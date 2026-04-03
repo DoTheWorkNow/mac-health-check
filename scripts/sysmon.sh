@@ -57,7 +57,7 @@ ps -Amr -o pid=,rss=,%cpu=,comm= 2>/dev/null | awk '
 # --- Disk ---
 echo ""
 echo "## Disk"
-df -H / 2>/dev/null | awk 'NR==2{printf "Root: %s total, %s used, %s free (%s used)\n", $2, $3, $4, $5}'
+df -H /System/Volumes/Data 2>/dev/null | awk 'NR==2{printf "Data: %s total, %s used, %s free (%s used)\n", $2, $3, $4, $5}'
 
 # --- System ---
 echo ""
