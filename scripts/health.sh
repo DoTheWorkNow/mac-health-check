@@ -1,98 +1,43 @@
 #!/bin/bash
-# Mac Health Check orchestrator.
-# Prefers Mole (mo status) for rich data; falls back to sysmon.sh otherwise.
-# Usage: health.sh [--deep]
-#   --deep : also run `mo clean --dry-run` and append cleanup summary
-
+# Read-only health snapshot; cleanup is explicitly preview-only.
 set -u
-
-DEEP=0
-[[ "${1:-}" == "--deep" ]] && DEEP=1
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-if ! command -v mo >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-  # Fallback: legacy sysmon (no Mole or no jq)
-  echo "=== MAC SYSTEM HEALTH (legacy sysmon) ==="
-  echo "Note: install mole (brew install tw93/tap/mole) + jq for richer output"
-  echo ""
+DEEP=0
+for arg in "$@"; do
+  case "$arg" in
+    --deep) DEEP=1 ;;
+    -h|--help) echo 'Usage: health.sh [--deep] (cleanup preview; no deletion)'; exit 0 ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+echo "Collected: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+fallback() {
+  echo "WARNING: $1; native fallback follows. Missing probes are unknown, not healthy."
   bash "$SCRIPT_DIR/sysmon.sh"
-  exit 0
+}
+if command -v mo >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  # Explicit JSON avoids a TUI when invoked from a terminal. Keep stderr visible.
+  if raw=$(mo status --json) && summary=$(printf '%s\n' "$raw" | jq -er -f "$SCRIPT_DIR/status.jq"); then
+    echo '=== MAC SYSTEM HEALTH (Mole) ==='
+    printf '%s\n' "$summary"
+  else
+    fallback 'Mole failed or returned invalid/unsupported JSON'
+  fi
+else
+  fallback 'Mole or jq unavailable'
 fi
-
-raw=$(mo status 2>/dev/null)
-if [[ -z "$raw" ]]; then
-  echo "mo status returned empty, falling back to sysmon"
-  bash "$SCRIPT_DIR/sysmon.sh"
-  exit 0
-fi
-
-echo "=== MAC SYSTEM HEALTH (Mole) ==="
-echo "$raw" | jq -r '
-  def gb: . / 1073741824 | . * 10 | round / 10;
-
-  "## Snapshot",
-  "Score: \(.health_score) — \(.health_score_msg)",
-  "Hardware: \(.hardware.model) · \(.hardware.cpu_model) · \(.hardware.os_version)",
-  "Uptime: \(.uptime) | Processes: \(.procs)",
-  (if .proxy.enabled then "Proxy: \(.proxy.type) \(.proxy.host)" else empty end),
-  "",
-  "## Memory",
-  "Total: \(.memory.total | gb)GB | Used: \(.memory.used | gb)GB (\(.memory.used_percent | floor)%) | Cached: \(.memory.cached | gb)GB",
-  "Swap: \(.memory.swap_used | gb)GB / \(.memory.swap_total | gb)GB (\(if .memory.swap_total > 0 then (.memory.swap_used / .memory.swap_total * 100 | floor) else 0 end)%)",
-  "",
-  "## CPU",
-  "Usage: \(.cpu.usage | floor)% | Load: \(.cpu.load1 * 100 | round / 100) / \(.cpu.load5 * 100 | round / 100) / \(.cpu.load15 * 100 | round / 100) | Cores: \(.cpu.core_count) (\(.cpu.p_core_count)P + \(.cpu.e_core_count)E)",
-  "",
-  "## Disk",
-  (.disks[] | "  \(.mount) — \(.used | gb)/\(.total | gb)GB (\(.used_percent | floor)%)\(if .external then " [external]" else "" end)"),
-  "",
-  "## Battery",
-  (.batteries[] | "Level: \(.percent)% \(.status) | Health: \(.health) | Cycles: \(.cycle_count) | Capacity: \(.capacity)%\(if .time_left then " | Remaining: \(.time_left)" else "" end)"),
-  "",
-  "## Thermal",
-  "Battery temp: \(.thermal.battery_temp)°C\(if .thermal.cpu_temp > 0 then " | CPU: \(.thermal.cpu_temp)°C" else "" end)\(if .thermal.fan_speed > 0 then " | Fan: \(.thermal.fan_speed) rpm" else "" end)",
-  "",
-  "## Top Processes",
-  (.top_processes[] | "  \(.name) (PID \(.pid)) — CPU \(.cpu)% | MEM \(.memory)%")
-'
-
-# Bluetooth: only show items with battery info (e.g., AirPods charge alerts)
-bt_summary=$(echo "$raw" | jq -r '.bluetooth[] | select(.battery != "" and .battery != null) | "  \(.name): \(.battery)"')
-if [[ -n "$bt_summary" ]]; then
-  echo ""
-  echo "## Bluetooth"
-  echo "$bt_summary"
-fi
-
-# Process alerts (Mole's own watcher)
-alerts=$(echo "$raw" | jq -r '.process_alerts // [] | length')
-if [[ "$alerts" != "0" ]]; then
-  echo ""
-  echo "## Process Alerts"
-  echo "$raw" | jq -r '.process_alerts[]'
-fi
-
 if [[ $DEEP == 1 ]]; then
-  echo ""
-  echo "=== CLEANUP PREVIEW (mo clean --dry-run) ==="
-  # Strip ANSI color codes so grep can match plainly. Mole tags every cleanable
-  # item with a trailing "dry" — that's our anchor.
-  mo_out=$(mo clean --dry-run 2>&1 | sed $'s/\033\\[[0-9;]*[a-zA-Z]//g')
-  # Categories actually carrying space (sorted big→small, top 15)
-  echo "$mo_out" | grep -E 'dry$' \
-    | awk '{
-        # The size token is the second-last word, e.g. "60.1MB" or "402KB" or "1.2GB"
-        n = NF; size = $(n-1)
-        unit = substr(size, length(size)-1)
-        num = substr(size, 1, length(size)-2) + 0
-        if (unit == "GB") mb = num * 1024
-        else if (unit == "MB") mb = num
-        else if (unit == "KB") mb = num / 1024
-        else mb = 0
-        printf "%10.2f|%s\n", mb, $0
-      }' \
-    | sort -t'|' -k1 -rn | head -15 | cut -d'|' -f2-
-  echo ""
-  echo "$mo_out" | grep -E '(Potential space|Detailed file list)' | head -2
+  if ! command -v mo >/dev/null 2>&1; then
+    echo 'WARNING: Cleanup preview unavailable: Mole not installed.'
+    exit 1
+  fi
+  echo '=== CLEANUP PREVIEW (no deletion; Mole may write its preview list/logs) ==='
+  # Preserve warnings and incomplete-scan messages, not just size totals.
+  # No sudo, --yes, or interactive input. The caller must use a bounded tool run.
+  mo clean --dry-run </dev/null
+  result=$?
+  if [[ $result != 0 ]]; then
+    echo "WARNING: Cleanup preview failed/partial (exit $result); no complete total available." >&2
+  fi
+  exit "$result"
 fi
